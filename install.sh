@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Link the non-Claude parts of this repo into place: hc-trace CLI, the Herdr
 # trace panel mod, and the agy worker template. Safe to re-run. An existing
-# file that is not already our symlink is moved aside to <path>.bak first.
+# file that is not already our symlink is moved to ~/.local/state/claude-hc/backup/
+# (not left beside it: Herdr would load a mods/trace.bak folder as another mod).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKUP="${XDG_STATE_HOME:-$HOME/.local/state}/claude-hc/backup/$(date +%Y%m%d-%H%M%S)"
 
 link() {
   local src="$1" dst="$2"
@@ -14,8 +16,9 @@ link() {
     return
   fi
   if [ -e "$dst" ] || [ -L "$dst" ]; then
-    mv "$dst" "$dst.bak"
-    echo "backup   $dst -> $dst.bak"
+    mkdir -p "$BACKUP"
+    mv "$dst" "$BACKUP/$(basename "$dst")"
+    echo "backup   $dst -> $BACKUP/$(basename "$dst")"
   fi
   ln -s "$src" "$dst"
   echo "linked   $dst -> $src"
