@@ -1,0 +1,11 @@
+{
+  "name": "claude-hc",
+  "owner": { "name": "Vinh Truong" },
+  "plugins": [
+    {
+      "name": "hc",
+      "source": "./",
+      "description": "Orchestrate worker coding agents (agy) in hc/herdr terminals, with Claude Code as the orchestrator."
+    }
+  ]
+}

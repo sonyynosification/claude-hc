@@ -1,0 +1,6 @@
+{
+  "name": "hc",
+  "version": "0.1.0",
+  "description": "Orchestrate worker coding agents (agy) in hc/herdr terminals, with Claude Code as the orchestrator.",
+  "author": { "name": "Vinh Truong" }
+}
