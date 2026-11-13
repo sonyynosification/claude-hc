@@ -8,13 +8,14 @@ Claude Code as the orchestrator of worker coding agents running in
 | `orchestrate` skill | `skills/orchestrate/SKILL.md` | Claude Code plugin |
 | `hc-trace` (records who called whom, summarizes each turn) | `hc-trace/hctrace.py` | `install.sh` → `~/.local/bin/hc-trace` |
 | Agent trace panel for the Herdr app | `herdr/mods/trace/` | `install.sh` → `~/.config/herdr-app/mods/trace` |
-| `agy` worker template | `herdr/templates/agy.md` | `install.sh` → `~/.config/herdr-core/templates/agy.md` |
+| Worker templates: `flash`, `hydrogen`, `sonnet` | `herdr/templates/*.md` | `install.sh` → `~/.config/herdr-core/templates/` |
 
 ## Prerequisites
 
 - `hc` / herdr and the Herdr app (`herdr-app`)
-- `agy` (Antigravity CLI) for the worker template
-- `claude` CLI if you keep the default Haiku summarizer (`hc-trace summarizer` to change)
+- `agy` (Antigravity CLI) for the `flash` and `hydrogen` workers
+- `claude` CLI for the `sonnet` worker
+- `claude` CLI also runs the default Haiku summarizer (`hc-trace summarizer` to change)
 - Python 3
 
 ## Install
@@ -39,10 +40,11 @@ Optional, to have Claude delegate on its own initiative, add to `~/.claude/CLAUD
 ```md
 ## Worker agents (hc)
 
-Another coding agent is available as a worker through `hc` (herdr): `agy` (Gemini 3.8
-Flash, auto mode - long, medium-complexity tasks). When a task has independent parts or
-a long medium-complexity chunk that can run alongside your own work, delegate on your
-own initiative: load the `orchestrate` skill and follow it.
+Worker agents are available through `hc` (herdr): `flash` (Gemini 3.8 Flash - high-volume
+and browser tasks), `hydrogen` (Gemini 4 Hydrogen) and `sonnet` (Claude Sonnet 5.5) for
+medium-to-hard tasks. When a task has independent parts, high-volume or browser work, or a
+long chunk that can run alongside your own work, delegate on your own initiative: load the
+`orchestrate` skill and follow it. Prefer a mix of models over several copies of one.
 ```
 
 ## Use

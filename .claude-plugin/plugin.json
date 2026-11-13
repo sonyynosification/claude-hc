@@ -1,6 +1,6 @@
 {
   "name": "hc",
-  "version": "0.1.0",
-  "description": "Orchestrate worker coding agents (agy) in hc/herdr terminals, with Claude Code as the orchestrator.",
+  "version": "0.2.0",
+  "description": "Orchestrate worker coding agents (Gemini Flash, Gemini Hydrogen, Claude Sonnet) in hc/herdr terminals, with Claude Code as the orchestrator.",
   "author": { "name": "Vinh Truong" }
 }

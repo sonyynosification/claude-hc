@@ -5,7 +5,7 @@
     {
       "name": "hc",
       "source": "./",
-      "description": "Orchestrate worker coding agents (agy) in hc/herdr terminals, with Claude Code as the orchestrator."
+      "description": "Orchestrate worker coding agents (Gemini Flash, Gemini Hydrogen, Claude Sonnet) in hc/herdr terminals, with Claude Code as the orchestrator."
     }
   ]
 }

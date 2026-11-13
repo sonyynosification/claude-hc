@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Link the non-Claude parts of this repo into place: hc-trace CLI, the Herdr
-# trace panel mod, and the agy worker template. Safe to re-run. An existing
+# trace panel mod, and the worker templates. Safe to re-run. An existing
 # file that is not already our symlink is moved to ~/.local/state/claude-hc/backup/
 # (not left beside it: Herdr would load a mods/trace.bak folder as another mod).
 set -euo pipefail
@@ -27,7 +27,16 @@ link() {
 chmod +x "$REPO/hc-trace/hctrace.py"
 link "$REPO/hc-trace/hctrace.py"     "$HOME/.local/bin/hc-trace"
 link "$REPO/herdr/mods/trace"        "$HOME/.config/herdr-app/mods/trace"
-link "$REPO/herdr/templates/agy.md"  "$HOME/.config/herdr-core/templates/agy.md"
+TPL="$HOME/.config/herdr-core/templates"
+for t in "$REPO"/herdr/templates/*.md; do
+  link "$t" "$TPL/$(basename "$t")"
+done
+# Drop links to templates this repo no longer has (e.g. the old agy.md).
+for l in "$TPL"/*.md; do
+  if [ -L "$l" ] && [ ! -e "$l" ] && [[ "$(readlink "$l")" == "$REPO"/* ]]; then
+    rm "$l"; echo "removed  $l (stale link)"
+  fi
+done
 
 for cmd in hc agy herdr-app; do
   command -v "$cmd" >/dev/null || echo "warning  '$cmd' not found on PATH"

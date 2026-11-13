@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Delegate work to other coding agents (agy) running in hc terminals, with Claude Code as the orchestrator. Use when a task splits into independent parts, when a long medium-complexity chunk can run in parallel with your own work, or when the user asks to spawn, delegate to, or orchestrate agents/workers via hc.
+description: Delegate work to worker coding agents (Gemini Flash, Gemini Hydrogen, Claude Sonnet) running in hc terminals, with Claude Code as the orchestrator. Use when a task splits into independent parts, when a long medium-complexity chunk can run in parallel with your own work, when there is high-volume or browser work to hand off, or when the user asks to spawn, delegate to, or orchestrate agents/workers via hc.
 ---
 
 # Orchestrating worker agents with hc
@@ -13,12 +13,28 @@ You are the main executor. You plan, delegate, verify and integrate. Workers run
 
 Run `hc templates` for the live list. Current roster:
 
-| Template | Model | Use for | Do not use for |
+| Template | Agent / model | Use for | Do not use for |
 |---|---|---|---|
-| `agy` | Gemini 3.8 Flash, auto mode | Long tasks of medium complexity: multi-file implementation, refactors, test writing, codebase research. Approves its own tool calls. | Hard design or subtle debugging - keep those yourself. |
+| `flash` | agy, Gemini 3.8 Flash, auto mode | **High-volume** work: many similar items (pages, components, fixtures, translations), bulk mechanical edits, broad sweeps. **Browser interaction**: checking a page, clicking through a flow, screenshots. | Anything needing careful judgment. |
+| `hydrogen` | agy, Gemini 4 Hydrogen, auto mode | Medium-to-hard tasks: multi-file implementation, refactors, test writing, codebase research. Sonnet-class. | Hard design or subtle debugging. |
+| `sonnet` | Claude Code, Claude Sonnet 5.5, auto permission mode | Same tier as `hydrogen`: multi-file implementation, refactors, test writing, codebase research. | Hard design or subtle debugging. |
 
-Keep for yourself: architecture decisions, anything ambiguous, final review and
-integration. Don't delegate a task that is quicker to do than to brief.
+Keep for yourself: architecture decisions, anything ambiguous, hard debugging, final
+review and integration. Don't delegate a task that is quicker to do than to brief.
+
+### Choosing workers
+
+- **Mix models.** When you run two or more workers, give them different templates
+  rather than several copies of one, e.g. one `hydrogen` and one `sonnet`, plus
+  `flash` for the bulk part. Different models make different mistakes, and a mix
+  shows which one handles this codebase best.
+- **Route by kind of work**, not just size: high-volume or browser work goes to
+  `flash`; a substantial piece that needs real reasoning goes to `hydrogen` or
+  `sonnet`. If two pieces are equal, split them across `hydrogen` and `sonnet`.
+- **Cross-check with a different model.** When a worker's result is risky enough to
+  want a second look, have a worker on a different model review it (read-only),
+  then verify yourself as usual.
+- Say in your update to the user which template each worker runs.
 
 ## How results reach you
 
@@ -42,17 +58,18 @@ and you read that file. Use `hc read` for blocked or error screens and as a fall
 3. **Spawn** each worker in the background with a unique name:
 
    ```sh
-   hc run --bg --name api-tests agy "<brief>"
+   hc run --bg --name api-tests hydrogen "<brief>"
+   hc run --bg --name fixtures  flash    "<brief>"
    ```
 
    Add `--cwd <dir>` when the work is not in your current directory.
 
    Check the JSON that `hc run` prints. If `first_message.sent` is `false`, the brief
-   was **not delivered**: the worker opened on a dialog. For `agy` this is the
-   "Do you trust this folder?" prompt, shown the first time it runs in a directory.
-   Read the screen (`hc read <name>`); if it is that prompt and the folder is the
-   user's project or one you created, accept with `hc keys <name> enter`, then deliver
-   the brief yourself with `hc send <name> "<brief>"`.
+   was **not delivered**: the worker opened on a dialog. Both agy and Claude Code show
+   a "trust this folder?" prompt the first time they run in a directory. Read the
+   screen (`hc read <name>`); if it is that prompt and the folder is the user's
+   project or one you created, accept with `hc keys <name> enter`, then deliver the
+   brief yourself with `hc send <name> "<brief>"`.
 4. **Keep working** on your own part, and wait without blocking yourself. Run the wait
    with the Bash tool's `run_in_background`, so you are re-invoked when it ends:
 
@@ -68,8 +85,10 @@ and you read that file. Use `hc read` for blocked or error screens and as a fall
    to `hc read <name> --lines 120` and ask the worker (`hc send`) to write it.
 6. **Handle the status** (`hc ls` / `hc get <name>`):
    - `done` - read the report, then verify it yourself (see below).
-   - `blocked` - read the screen first. `agy` approves its own tool calls, so a block
-     is usually a dialog (folder trust) or a question, not a permission prompt. Answer
+   - `blocked` - read the screen first. agy workers (`flash`, `hydrogen`) approve their
+     own tool calls, so a block there is usually a dialog (folder trust) or a question.
+     A `sonnet` worker in auto mode can still stop on a permission prompt for a risky
+     command; judge it as below. Answer
      a question with `hc send <name> "<answer>"`; accept a safe, in-scope prompt with
      `hc send <name> y` or `hc keys <name> enter`; refuse with `n`. If it is
      destructive, out of scope, or you are unsure, ask the user.
