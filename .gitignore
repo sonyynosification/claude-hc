@@ -2,3 +2,4 @@
 gpui-kit.d.ts
 *.bak
 .hc-reports/
+__pycache__/

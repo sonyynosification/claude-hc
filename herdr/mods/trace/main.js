@@ -1,6 +1,7 @@
 // Agent trace: which agent called which through hc, how long each worked, and a
-// one-line summary of what it was asked and what it answered. Reads `hc-trace show
-// --json` (the recorder in ~/tools/fm-agent/hctrace.py writes the trace). Read-only,
+// one-line summary of what it was asked and what it answered, and what its tokens
+// would cost at API prices. Reads `hc-trace show --json` (hc-trace/hctrace.py in the
+// claude-hc repo records the trace and works out the cost). Read-only,
 // except the button that starts the recorder. Click a live worker to go to it;
 // click a question or answer to see the raw text.
 
@@ -15,6 +16,21 @@ function clock(ms) {
   const d = new Date(ms);
   const two = (n) => String(n).padStart(2, "0");
   return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+}
+
+// The same rounding as hc-trace show.
+function money(c) {
+  if (c == null) return "$?";
+  return "$" + (c >= 1 ? c.toFixed(2) : c >= 0.01 ? c.toFixed(3) : c.toFixed(4));
+}
+
+function ktok(n) {
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n);
+}
+
+function tokens(u) {
+  const k = u.tokens;
+  return `${ktok(k.in + k.cache_read + k.cache_write_5m + k.cache_write_1h)} in · ${ktok(k.out)} out`;
 }
 
 function shortPath(p) {
@@ -98,7 +114,10 @@ export default class Trace extends View {
         .child(div().flex_none().font_semibold().text_color(t.foreground).child(n.agent ?? "?"))
         .child(div().flex_1().truncate().text_color(t.muted).child(`${n.name ?? ""} (${n.addr})`))
         .child(div().flex_none().text_color(this.color(t, state)).child(state))
-        .child(div().flex_none().text_color(t.dim).child(n.took ?? "")),
+        .child(div().flex_none().text_color(t.dim).child(n.took ?? ""))
+        .when(Boolean(n.usage), (el) => el
+          .child(div().flex_none().text_color(t.dim).child(tokens(n.usage)))
+          .child(div().flex_none().w(52).font_semibold().text_color(t.foreground).child(money(n.usage.cost)))),
     ];
     for (const turn of n.turns) {
       const key = `${n.id}#${turn.n}`;
@@ -115,11 +134,14 @@ export default class Trace extends View {
 
   root(t, r, live) {
     const count = r.children.length;
+    const total = r.total
+      ? ` · ${money(r.total.cost)}` + (r.usage ? ` (workers ${money(r.total.workers)}, orchestrator ${money(r.usage.cost)})` : "")
+      : "";
     return v_flex().gap(4).p(8).rounded(8).bg(t.surface).border(1).border_color(t.border)
       .child(h_flex().gap(8).items_center()
         .child(div().flex_none().font_semibold().text_color(t.foreground).child(`${r.agent ?? "terminal"} (${r.addr})`))
         .child(div().flex_1().truncate().text_color(t.muted).child(r.title || shortPath(r.cwd)))
-        .child(div().flex_none().text_color(t.dim).child(`${count} worker${count === 1 ? "" : "s"} · ${r.span}`)))
+        .child(div().flex_none().text_color(t.dim).child(`${count} worker${count === 1 ? "" : "s"} · ${r.span}${total}`)))
       .children(r.children.map((c) => this.worker(t, c, 0, live)));
   }
 
@@ -143,6 +165,9 @@ export default class Trace extends View {
       .when(!this.error && Boolean(d) && roots.length === 0, (el) => el.child(div().p(12)
         .child("No agent calls recorded yet. Workers started with hc run from an agent show up here.")))
       .child(v_flex().id("list").flex_1().p(8).gap(8).overflow_y_scrollbar()
-        .children(roots.map((r) => this.root(t, r, live))));
+        .children(roots.map((r) => this.root(t, r, live))))
+      .when(roots.some((r) => r.total), (el) => el.child(div().flex_none().pl(12).pr(12).pb(6).text_color(t.dim)
+        .child("Cost: the tokens at API list prices; on a subscription that is an equivalent, not a bill. "
+          + "The orchestrator's cost is its whole Claude session.")));
   }
 }

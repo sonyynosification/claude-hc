@@ -16,6 +16,12 @@ hc-trace - record and show which agent called which through hc (herdr-core).
        --since 2h|30m|3d  how far back        --all      everything
        --root t2d         one orchestrator    --raw      raw text, not summaries
        --json             the tree as JSON (for a viewer)
+       --no-cost          skip reading the agents' token usage
+
+Cost: each worker's tokens are read from its own session (Claude Code transcript,
+agy conversation database) and priced at API list prices (PRICES; override in
+~/.local/state/hc-trace/prices.json). On a subscription that is an equivalent,
+not a bill. The orchestrator's own session is counted in the root's total.
 
 The recorder follows `hc events`. Every terminal with a parent is a worker. For
 each worker it records when it was spawned, each turn (time working, time blocked
@@ -396,7 +402,7 @@ def read_trace():
             except json.JSONDecodeError:
                 continue
 
-def build(since_ms: int | None, root: str | None) -> list[dict]:
+def build(since_ms: int | None, root: str | None, cost: bool = True) -> list[dict]:
     nodes: dict[str, dict] = {}
     def node(tid):
         return nodes.setdefault(tid, {"id": tid, "addr": tid.split("@")[0], "children": [], "turns": {}})
@@ -432,6 +438,17 @@ def build(since_ms: int | None, root: str | None) -> list[dict]:
     roots.sort(key=lambda r: r["children"][0]["start"])
     for r in roots:
         annotate_root(r)
+    if cost:
+        u = Usage()
+        for r in roots:
+            try:
+                u.annotate(r)
+            except Exception as e:              # never let cost break the trace
+                r["usage_error"] = f"{type(e).__name__}: {e}"
+        try:
+            u.save()
+        except OSError:
+            pass
     return roots
 
 def annotate(n: dict) -> None:
@@ -467,6 +484,318 @@ def annotate_root(r: dict) -> None:
     r["span"] = dur(r["span_ms"])
 
 
+# --- cost: tokens each session used, priced at API rates -------------------------
+# Read from the agents' own records when the trace is shown, so it covers past runs
+# and needs nothing from the recorder. Claude Code: assistant messages in
+# ~/.claude/projects/<cwd>/<session>.jsonl carry `usage` (deduped by message id).
+# agy: each model call is a row of gen_metadata in conversations/<id>.db, a protobuf
+# with model name and usage {2: input, 5: cached input, 3: output incl. 9: thinking}
+# (undocumented; read from the data). On a subscription nothing is billed per token;
+# the price is what the same tokens would cost on the API.
+
+# $ per 1M tokens: input, output, cache read, cache write 5m, cache write 1h.
+# Claude: Anthropic API list prices (cache writes 1.25x / 2x input; Haiku 5.5 has a
+# higher tier for prompts over 100K). Gemini: aistudio.google.com/docs/pricing,
+# standard tier, implicit caching (no write cost). Checked 2026-11-13.
+# Override or add models in ~/.local/state/hc-trace/prices.json: {"model": [in, out, ...]}.
+PRICES = {
+    "claude-opus-5-5":        (4.00, 20.00, 0.20, 5.00, 8.00),
+    "claude-sonnet-5-5":      (2.00, 10.00, 0.10, 2.50, 4.00),
+    "claude-haiku-5-5":       (0.10, 0.50, 0.01, 0.125, 0.20),
+    "claude-haiku-5-5@long":  (0.50, 2.50, 0.05, 0.625, 1.00),
+    "gemini-4-hydrogen":      (1.50, 7.50, 0.075, 0, 0),
+    "gemini-3.8-flash":       (0.75, 3.75, 0.075, 0, 0),   # until 2026-12-31, then 2x
+}
+PRICE_FILE = STATE / "prices.json"
+USAGE_CACHE = STATE / "usage-cache.json"
+CLAUDE_PROJECTS = Path.home() / ".claude/projects"
+AGY = Path.home() / ".gemini/antigravity-cli"
+FIELDS = ("in", "out", "cache_read", "cache_write_5m", "cache_write_1h")
+
+def prices() -> dict:
+    p = dict(PRICES)
+    try:
+        p.update({k: tuple(v) + (0,) * (5 - len(v)) for k, v in json.loads(PRICE_FILE.read_text()).items()})
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return p
+
+def price_of(model: str, table: dict):
+    """The model's own price, else the longest key it extends ('gemini-3.8-flash-n'),
+    never pricing a 'lite' model as the full one."""
+    for k in sorted(table, key=len, reverse=True):
+        if model == k or (model.startswith(k + "-") and "lite" not in model[len(k):]):
+            return table[k]
+    return None
+
+def priced(by_model: dict) -> dict:
+    """{model: tokens} -> {"models", "tokens", "cost"}; cost is None if a model has no price."""
+    table, cost, tok = prices(), 0.0, dict.fromkeys(FIELDS, 0)
+    for model, u in by_model.items():
+        for f in FIELDS:
+            tok[f] += u.get(f, 0)
+        p = price_of(model, table)
+        if p is None:
+            cost = None
+        elif cost is not None:
+            cost += sum(u.get(f, 0) * rate for f, rate in zip(FIELDS, p)) / 1e6
+    return {"models": sorted({m.split("@")[0] for m in by_model}), "tokens": tok, "cost": cost}
+
+def _add(acc: dict, model: str, **tok) -> None:
+    m = acc.setdefault(model, dict.fromkeys(FIELDS, 0))
+    for f, v in tok.items():
+        m[f] += v or 0
+
+def claude_tokens(path: Path) -> dict:
+    seen, acc = set(), {}
+    for line in open(path, errors="replace"):
+        if '"usage"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        m = d.get("message") if d.get("type") == "assistant" else None
+        if not isinstance(m, dict) or not m.get("usage") or m.get("id") in seen:
+            continue
+        seen.add(m.get("id"))
+        u = m["usage"]
+        cw = u.get("cache_creation") or {}
+        w1h = cw.get("ephemeral_1h_input_tokens") or 0
+        w5m = cw.get("ephemeral_5m_input_tokens", (u.get("cache_creation_input_tokens") or 0) - w1h) or 0
+        tok = {"in": u.get("input_tokens") or 0, "out": u.get("output_tokens") or 0,
+               "cache_read": u.get("cache_read_input_tokens") or 0, "cache_write_5m": w5m, "cache_write_1h": w1h}
+        model = m.get("model") or "?"
+        if model.startswith("claude-haiku-5-5") and tok["in"] + tok["cache_read"] + w5m + w1h > 100_000:
+            model = "claude-haiku-5-5@long"
+        _add(acc, model, **tok)
+    return acc
+
+def _pb(b: bytes):
+    """Fields of one protobuf message: [(field, int | bytes)]."""
+    def varint(i):
+        r = s = 0
+        while True:
+            c = b[i]; i += 1; r |= (c & 0x7F) << s; s += 7
+            if c < 0x80:
+                return r, i
+    i, out = 0, []
+    while i < len(b):
+        key, i = varint(i)
+        wire = key & 7
+        if wire == 0:
+            v, i = varint(i)
+        elif wire == 2:
+            n, i = varint(i); v = b[i:i + n]; i += n
+        elif wire in (1, 5):
+            n = 8 if wire == 1 else 4; v = b[i:i + n]; i += n
+        else:
+            raise ValueError("wire type %d" % wire)
+        out.append((key >> 3, v))
+    return out
+
+def agy_tokens(db: Path) -> dict:
+    import sqlite3
+    acc = {}
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = con.execute("select data from gen_metadata").fetchall()
+    finally:
+        con.close()
+    for (data,) in rows:
+        try:
+            parts = [v for _, v in _pb(data) if isinstance(v, bytes)]
+        except (ValueError, IndexError):
+            continue
+        for body in parts:                   # the generation: usage in 17.2, model in 19
+            try:                             # (other fields are strings, not messages)
+                top = dict(_pb(body))
+                if not (isinstance(top.get(17), bytes) and isinstance(top.get(19), bytes)):
+                    continue
+                u = {k: v for k, v in _pb(dict(_pb(top[17])).get(2, b"")) if isinstance(v, int)}
+                model = top[19].decode()
+            except (ValueError, IndexError, UnicodeDecodeError, TypeError):
+                continue
+            _add(acc, model, **{"in": u.get(2), "out": u.get(3), "cache_read": u.get(5)})
+            break
+    return acc
+
+class Usage:
+    """Finds each terminal's agent session and its tokens. Cached in usage-cache.json:
+    a finished worker's match for good, tokens per (file, mtime, size)."""
+    def __init__(self):
+        try:
+            self.c = json.loads(USAGE_CACHE.read_text())
+        except (OSError, ValueError):
+            self.c = {}
+        for k in ("match", "tokens", "scan"):
+            self.c.setdefault(k, {})
+        self.dirty = False
+        self.taken = {f for v in self.c["match"].values() for f in v}
+
+    def save(self) -> None:
+        if self.dirty:
+            tmp = USAGE_CACHE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self.c))
+            tmp.replace(USAGE_CACHE)
+
+    def tokens(self, path: str) -> dict:
+        try:
+            st = Path(path).stat()
+        except OSError:
+            return {}
+        key, hit = f"{st.st_mtime_ns}:{st.st_size}", self.c["tokens"].get(path)
+        if not hit or hit[0] != key:
+            hit = self.c["tokens"][path] = [key, agy_tokens(Path(path)) if path.endswith(".db")
+                                            else claude_tokens(Path(path))]
+            self.dirty = True
+        return hit[1]
+
+    def of(self, files: list[str]) -> dict | None:
+        acc = {}
+        for f in files:
+            for model, u in self.tokens(f).items():
+                _add(acc, model, **u)
+        return dict(priced(acc), sessions=len([f for f in files if "/subagents/" not in f])) if acc else None
+
+    def match(self, tid: str, find, final: bool) -> list[str]:
+        if tid in self.c["match"]:
+            return self.c["match"][tid]
+        files = find()
+        self.taken.update(files)            # this run: no two terminals share a session
+        if files and final:
+            self.c["match"][tid] = files
+            self.dirty = True
+        return files
+
+    # Claude Code ---------------------------------------------------------------
+    @staticmethod
+    def project_dir(cwd: str | None) -> Path:
+        return CLAUDE_PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", cwd or "")
+
+    @staticmethod
+    def first_ts(path: Path):
+        with open(path, errors="replace") as f:
+            for line in f:
+                m = re.search(r'"timestamp":"([^"]+)"', line)
+                if m:
+                    return datetime.fromisoformat(m.group(1).replace("Z", "+00:00")).timestamp() * 1000
+        return None
+
+    @staticmethod
+    def with_subagents(path: str) -> list[str]:
+        return [path] + sorted(str(s) for s in Path(path[:-6]).glob("subagents/**/*.jsonl"))
+
+    def claude_worker(self, n: dict) -> list[str]:
+        """The session in its folder that started first within two minutes of the spawn."""
+        best = None
+        for p in self.project_dir(n.get("cwd")).glob("*.jsonl"):
+            if str(p) in self.taken or p.stat().st_mtime * 1000 < n["start"]:
+                continue
+            ts = self.first_ts(p)
+            if ts and n["start"] - 2000 <= ts <= n["start"] + 120_000 and (not best or ts < best[0]):
+                best = (ts, str(p))
+        return self.with_subagents(best[1]) if best else []
+
+    # what `hc run` prints (keys sorted): ..."first_message":{...},"name":"x","parent":"t4"
+    # (in a transcript the JSON sits inside a string, so its quotes may be escaped)
+    SPAWNED = re.compile(rb'first_message\\*":\{[^}]*\},\\*"name\\*":\\*"([^"\\]+)\\*",'
+                         rb'\\*"parent\\*":\\*"([^"\\]+)')
+
+    def spawned(self, path: Path) -> list:
+        """[name, parent] of each terminal this session started with `hc run`."""
+        st = path.stat()
+        key, hit = f"{st.st_mtime_ns}:{st.st_size}", self.c["scan"].get(str(path))
+        if not hit or hit[0] != key:
+            found = {(n.decode(errors="replace"), p.decode(errors="replace"))
+                     for n, p in self.SPAWNED.findall(path.read_bytes())}
+            hit = self.c["scan"][str(path)] = [key, sorted(map(list, found))]
+            self.dirty = True
+        return hit[1]
+
+    def claude_root(self, r: dict) -> list[str]:
+        """The orchestrator's sessions: those that spawned one of its children. Any
+        project folder: the terminal's cwd need not be where claude was started."""
+        names = {k["name"] for k in r["children"] if k.get("name")}
+        out = []
+        for p in CLAUDE_PROJECTS.glob("*/*.jsonl"):
+            if str(p) in self.taken or p.stat().st_mtime * 1000 < r["first"]:
+                continue
+            if any(nm in names and par == r["addr"] for nm, par in self.spawned(p)):
+                out += self.with_subagents(str(p))
+        return out
+
+    # agy -------------------------------------------------------------------------
+    def agy_worker(self, n: dict) -> list[str]:
+        """The conversations of the agy that started in its folder just after the spawn.
+        Logs are named by local start time; the first one after the spawn wins."""
+        best = None
+        for log in (AGY / "log").glob("cli-*.log"):
+            try:
+                ts = datetime.strptime(log.stem[4:], "%Y%m%d_%H%M%S").timestamp() * 1000
+            except ValueError:
+                continue
+            if not n["start"] - 2000 <= ts <= n["start"] + 30_000 or str(log) in self.taken:
+                continue
+            text = log.read_text(errors="replace")
+            if f"workspaceDirs=[{n.get('cwd')}]" not in text:
+                continue
+            dbs = [str(AGY / "conversations" / f"{c}.db")
+                   for c in dict.fromkeys(re.findall(r"Created conversation ([0-9a-f-]{36})", text))]
+            dbs = [d for d in dbs if Path(d).exists()]
+            if dbs and (not best or ts < best[0]):
+                best = (ts, [str(log)] + dbs)
+        return best[1] if best else []
+
+    @staticmethod
+    def kind(n: dict) -> str | None:
+        cmd = " ".join(n.get("argv") or [])
+        if re.search(r"\bclaude\b", cmd) or n.get("agent") in ("claude", "claude-code"):
+            return "claude"
+        if re.search(r"\bagy\b", cmd) or n.get("agent") in ("agy", "antigravity"):
+            return "agy"
+        return None
+
+    def annotate(self, r: dict) -> None:
+        def walk(n):
+            find = {"claude": lambda: self.claude_worker(n),
+                    "agy": lambda: self.agy_worker(n)}.get(self.kind(n))
+            files = self.match(n["id"], find, bool(n.get("end"))) if find else []
+            n["usage"] = self.of([f for f in files if not f.endswith(".log")])
+            for ch in n["children"]:
+                walk(ch)
+        for k in r["children"]:              # sorted by start: first come, first matched
+            walk(k)
+        # a root is never final: the orchestrator may go on to spawn more
+        files = self.match(r["id"] + "#root", lambda: self.claude_root(r), False) if self.kind(r) == "claude" else []
+        r["usage"] = self.of(files)
+        workers = [n["usage"] for k in r["children"] for n in _all(k) if n.get("usage")]
+        parts = workers + ([r["usage"]] if r["usage"] else [])
+        r["total"] = None if not parts else {
+            "cost": None if any(p["cost"] is None for p in parts) else sum(p["cost"] for p in parts),
+            "workers": None if any(p["cost"] is None for p in workers) else sum(p["cost"] for p in workers)}
+
+def _all(n: dict):
+    yield n
+    for ch in n["children"]:
+        yield from _all(ch)
+
+def money(c) -> str:
+    if c is None:
+        return "$?"
+    return f"${c:.2f}" if c >= 1 else f"${c:.3f}" if c >= 0.01 else f"${c:.4f}"
+
+def ktok(n: int) -> str:
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(n)
+
+def usage_line(u: dict | None) -> str:
+    if not u:
+        return ""
+    t = u["tokens"]
+    tin = t["in"] + t["cache_read"] + t["cache_write_5m"] + t["cache_write_1h"]
+    return f"{money(u['cost'])} · {ktok(tin)} in, {ktok(t['out'])} out"
+
+
 def dur(ms) -> str:
     if ms is None:
         return "?"
@@ -490,7 +819,8 @@ def show(roots: list[dict], raw: bool) -> None:
         cmd = "" if n.get("template") else " " + clip(" ".join(n.get("argv") or [])[-60:], 60)
         print(f"{prefix}{'└─' if last else '├─'} {datetime.fromtimestamp(n['start'] / 1000):%H:%M:%S}  "
               f"{c(1, n.get('agent') or '?')} {label} ({n['addr']}){c(2, cmd)}  "
-              f"{c(color.get(state, 2), state)}  {took}")
+              f"{c(color.get(state, 2), state)}  {took}"
+              + (f"  {c(35, usage_line(n.get('usage')))}" if n.get("usage") else ""))
         pad = prefix + ("   " if last else "│  ")
         for t in turns:
             if len(turns) > 1:
@@ -515,12 +845,22 @@ def show(roots: list[dict], raw: bool) -> None:
         first = r["first"]
         title = '  "%s"' % clip(r["title"], 60) if r.get("title") else ""
         plural = "" if len(kids) == 1 else "s"
+        tot = r.get("total")
+        cost = ""
+        if tot:
+            cost = f", {money(tot['cost'])}"
+            if r.get("usage"):
+                cost += f" ({money(tot['workers'])} workers + {money(r['usage']['cost'])} orchestrator)"
         print(f"{c(1, r.get('agent') or 'terminal')} ({r['addr']}){title}  {c(2, short(r.get('cwd')))}  "
-              f"{len(kids)} worker{plural}, {r['span']}  "
+              f"{len(kids)} worker{plural}, {r['span']}{c(35, cost)}  "
               f"{c(2, datetime.fromtimestamp(first / 1000).strftime('%b %d'))}")
+        if r.get("usage_error"):
+            print(c(2, f"  (cost not available: {r['usage_error']})"))
         for i, ch in enumerate(kids):
             worker(ch, "", i == len(kids) - 1)
         print()
+    if any(r.get("total") for r in roots):
+        print(c(2, "Cost: what the tokens would cost at API list prices (subscriptions are not billed per token)."))
 
 
 # --- daemon control -----------------------------------------------------------
@@ -599,7 +939,7 @@ def main() -> None:
         opts = args[1:]
         val = lambda flag: opts[opts.index(flag) + 1] if flag in opts and opts.index(flag) + 1 < len(opts) else None
         since = None if "--all" in opts else parse_since(val("--since") or "24h")
-        roots = build(since, val("--root"))
+        roots = build(since, val("--root"), "--no-cost" not in opts)
         if "--json" in opts:
             json.dump({"recorder": bool(running()), "roots": roots}, sys.stdout, ensure_ascii=False)
             print()

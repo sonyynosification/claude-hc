@@ -105,7 +105,9 @@ and you read that file. Use `hc read` for blocked or error screens and as a fall
     (your address is the `parent` in the JSON `hc run` printed) and include its output
     in your final report. The user can also open it in Herdr with `hc-trace view`. The
     summaries come from a small model and can be vague or wrong; your own verified
-    account of the results is the one that counts.
+    account of the results is the one that counts. Each worker line also shows what its
+    tokens would cost at API prices, and the root line the total; quote those as
+    API-equivalent cost, not money spent (subscriptions are not billed per token).
 
 ## Writing a brief
 
