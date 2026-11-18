@@ -8,12 +8,12 @@ Claude Code as the orchestrator of worker coding agents running in
 | `orchestrate` skill | `skills/orchestrate/SKILL.md` | Claude Code plugin |
 | `hc-trace` (records who called whom, summarizes each turn, prices each session) | `hc-trace/hctrace.py` | `install.sh` → `~/.local/bin/hc-trace` |
 | Agent trace panel for the Herdr app | `herdr/mods/trace/` | `install.sh` → `~/.config/herdr-app/mods/trace` |
-| Worker templates: `flash`, `hydrogen`, `sonnet` | `herdr/templates/*.md` | `install.sh` → `~/.config/herdr-core/templates/` |
+| Worker templates: `hydrogen`, `sonnet` | `herdr/templates/*.md` | `install.sh` → `~/.config/herdr-core/templates/` |
 
 ## Prerequisites
 
 - `hc` / herdr and the Herdr app (`herdr-app`)
-- `agy` (Antigravity CLI) for the `flash` and `hydrogen` workers
+- `agy` (Antigravity CLI) for the `hydrogen` worker
 - `claude` CLI for the `sonnet` worker
 - `claude` CLI also runs the default Haiku summarizer (`hc-trace summarizer` to change)
 - Python 3
@@ -40,9 +40,8 @@ Optional, to have Claude delegate on its own initiative, add to `~/.claude/CLAUD
 ```md
 ## Worker agents (hc)
 
-Worker agents are available through `hc` (herdr): `flash` (Gemini 3.8 Flash - high-volume
-and browser tasks), `hydrogen` (Gemini 4 Hydrogen) and `sonnet` (Claude Sonnet 5.5) for
-medium-to-hard tasks. When a task has independent parts, high-volume or browser work, or a
+Worker agents are available through `hc` (herdr): `hydrogen` (Gemini 4 Hydrogen - also
+high-volume and browser tasks) and `sonnet` (Claude Sonnet 5.5) for medium-to-hard tasks. When a task has independent parts, high-volume or browser work, or a
 long chunk that can run alongside your own work, delegate on your own initiative: load the
 `orchestrate` skill and follow it. Prefer a mix of models over several copies of one.
 ```
@@ -71,8 +70,8 @@ agents' own records, read when the trace is shown, so past runs are covered too:
   documented and was read from the data, so a new agy version may break it (cost then
   shows nothing for that worker).
 
-Prices are in `PRICES` in `hc-trace/hctrace.py` (checked 2026-11-13; Gemini 3.8 Flash
-doubles on 2027-01-01). Override or add models in `~/.local/state/hc-trace/prices.json`:
+Prices are in `PRICES` in `hc-trace/hctrace.py` (checked 2026-11-13). Override or add
+models in `~/.local/state/hc-trace/prices.json`:
 `{"model-id": [input, output, cache_read, cache_write_5m, cache_write_1h]}` in $ per
 1M tokens. A model without a price shows `$?`. `--no-cost` skips all of this.
 
